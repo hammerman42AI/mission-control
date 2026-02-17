@@ -9,6 +9,10 @@ import os from 'node:os';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = 8888;
 
+// OpenClaw Gateway Config
+const GATEWAY_URL = `http://127.0.0.1:${process.env.OPENCLAW_GATEWAY_PORT || 18789}`;
+const GATEWAY_TOKEN = process.env.OPENCLAW_GATEWAY_TOKEN || 'd6bf613fbcac1ac65e264d6baf94dde8e01aa2e313778af4';
+
 const MIME_TYPES = {
   '.html': 'text/html',
   '.js': 'text/javascript',
@@ -57,8 +61,6 @@ const COLORS = {
   elrond: "var(--accent-gold)"
 };
 
-const STAGES = ['consultation', 'assignment', 'execution', 'reflection', 'delivery'];
-
 // State
 const state = {
   ringOfPower: { totalTokens: 0, hourlyRate: 0, costEstimate: "0.00", corruptionLevel: 0 },
@@ -75,7 +77,13 @@ const state = {
     ping: false
   },
   pipeline: { active: null },
-  skills: []
+  skills: [],
+  approvalPending: null
+};
+
+const agentMap = {
+  'auditor': 'celebrimbor',
+  'main': 'samwise'
 };
 
 const broadcast = () => io.emit('telemetry', state);
@@ -130,12 +138,34 @@ const processLogLine = (line) => {
         if (metaName.includes('auditor')) councilId = 'celebrimbor';
 
         // --- GATE OF BREE (Approvals) ---
-        if (subsystem === 'gateway/exec-approvals' || msg.includes('Approval required')) {
+        // Format: {"subsystem":"gateway/exec-approvals","id":"...","command":"..."}
+        if (subsystem === 'gateway/exec-approvals' && (log.id || log.requestId)) {
+            state.approvalPending = {
+                id: log.id || log.requestId,
+                command: log.command || log.msg || "Restricted System Action"
+            };
             state.pipeline.active = 'assignment';
             state.gandalf.assignment = "GATE OF BREE: Waiting for Hammer's Mark...";
             state.gandalf.ping = true;
             broadcast();
             return;
+        }
+
+        // Catch textual approval requirements
+        if (msg.includes('Approval required') || msg.includes('Permission requested')) {
+             // If we didn't get an ID from structured log, try to find it in text
+             const idMatch = msg.match(/ID: ([\w-]+)/) || msg.match(/id: ([\w-]+)/);
+             if (idMatch) {
+                 state.approvalPending = {
+                     id: idMatch[1],
+                     command: msg
+                 };
+             }
+             state.pipeline.active = 'assignment';
+             state.gandalf.assignment = "GATE OF BREE: Pending User Approval...";
+             state.gandalf.ping = true;
+             broadcast();
+             return;
         }
 
         // --- SKILL EXECUTION ---
@@ -185,6 +215,7 @@ const processLogLine = (line) => {
 
         if (msg.includes('Run completed') || msg.includes('run_finish') || log.kind === 'run_finish') {
             state.pipeline.active = 'delivery';
+            state.approvalPending = null; // Clear any stale approvals
             setTimeout(() => {
                 state.pipeline.active = null;
                 state.gandalf.assignment = "Observing Council of Elrond";
@@ -193,13 +224,7 @@ const processLogLine = (line) => {
             broadcast();
         }
 
-    } catch (e) {
-        // Simple string parsing fallback
-        if (line.includes('Calling tool')) {
-            state.pipeline.active = 'execution';
-            broadcast();
-        }
-    }
+    } catch (e) {}
 };
 
 if (fs.existsSync(logPath)) {
@@ -220,10 +245,34 @@ io.on('connection', (socket) => {
       broadcast();
   });
 
-  // Approval Handlers
-  socket.on('approve-action', (data) => {
-    // To be implemented: Link back to openclaw gateway approvals
-    console.log('Dashboard Approval Received:', data);
+  // --- GATE OF BREE DECISION HANDLER ---
+  socket.on('approve-decision', async (data) => {
+    console.log('Gate of Bree Decision:', data);
+    const { id, allow } = data;
+    
+    try {
+        const response = await fetch(`${GATEWAY_URL}/api/v1/nodes/approve`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${GATEWAY_TOKEN}`
+            },
+            body: JSON.stringify({
+                action: allow ? 'approve' : 'reject',
+                requestId: id
+            })
+        });
+        
+        const result = await response.json();
+        console.log('Gateway Response:', result);
+        
+        state.approvalPending = null;
+        state.gandalf.assignment = allow ? "Hammer's Mark received. Proceeding." : "Entry denied. Task aborted.";
+        broadcast();
+        
+    } catch (e) {
+        console.error('Failed to communicate with OpenClaw Gateway:', e);
+    }
   });
 });
 
