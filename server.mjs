@@ -78,13 +78,6 @@ const state = {
   skills: []
 };
 
-// Map real agent IDs to Council names
-const agentMap = {
-  'auditor': 'celebrimbor', // Mapping default auditor to Celebrimbor for now
-  'main': 'samwise'
-};
-
-// Helper to broadcast state
 const broadcast = () => io.emit('telemetry', state);
 
 // --- Real Data Ingestion ---
@@ -105,7 +98,6 @@ const updateTokens = () => {
   proc.on('close', () => {
     try {
         const status = JSON.parse(data);
-        // Sum tokens across active sessions
         let total = 0;
         if (status.sessions) {
             status.sessions.forEach(s => {
@@ -113,7 +105,7 @@ const updateTokens = () => {
             });
         }
         state.ringOfPower.totalTokens = total;
-        state.ringOfPower.corruptionLevel = Math.min(100, (total / 1000000) * 100); // Corruption increases per million tokens
+        state.ringOfPower.corruptionLevel = Math.min(100, (total / 1000000) * 100);
     } catch (e) {}
     broadcast();
   });
@@ -121,75 +113,118 @@ const updateTokens = () => {
 setInterval(updateTokens, 60000);
 updateTokens();
 
-// 3. Log Tailing (Real-time activity)
+// 3. Log Tailing (Robust Parsing)
 const logPath = `/tmp/openclaw/openclaw-${new Date().toISOString().split('T')[0]}.log`;
+
+const processLogLine = (line) => {
+    if (!line.trim()) return;
+    try {
+        const log = JSON.parse(line);
+        const msg = log["0"] || log["2"] || log.msg || "";
+        const subsystem = log.subsystem || "";
+        const metaName = log._meta?.name || "";
+        
+        // Derive Agent/Council ID
+        let councilId = 'celebrimbor'; // default
+        if (metaName.includes('main') || msg.includes('main')) councilId = 'samwise';
+        if (metaName.includes('auditor')) councilId = 'celebrimbor';
+
+        // --- GATE OF BREE (Approvals) ---
+        if (subsystem === 'gateway/exec-approvals' || msg.includes('Approval required')) {
+            state.pipeline.active = 'assignment';
+            state.gandalf.assignment = "GATE OF BREE: Waiting for Hammer's Mark...";
+            state.gandalf.ping = true;
+            broadcast();
+            return;
+        }
+
+        // --- SKILL EXECUTION ---
+        let toolName = null;
+        if (msg.includes('Calling tool')) {
+            const match = msg.match(/Calling tool (\w+)/);
+            toolName = match ? match[1] : 'tool';
+        } else if (msg.includes('[tools]')) {
+            const match = msg.match(/\[tools\] (\w+)/);
+            toolName = match ? match[1] : 'tool';
+        } else if (log.kind === 'tool_start') {
+            toolName = log.tool || 'process';
+        }
+
+        if (toolName) {
+            state.pipeline.active = 'execution';
+            state.workforce[councilId].task = `Executing ${toolName}...`;
+            state.workforce[councilId].ping = true;
+            state.gandalf.assignment = `${councilId.toUpperCase()} is busy at the Forge.`;
+
+            state.skills.unshift({
+                user: councilId,
+                skill: toolName,
+                target: log["1"] ? (typeof log["1"] === 'string' ? log["1"] : JSON.stringify(log["1"])).substring(0, 40) : 'active pulse',
+                summary: `System action: ${toolName}`,
+                model: MODELS[councilId],
+                time: new Date().toLocaleTimeString(),
+                color: COLORS[councilId]
+            });
+            if (state.skills.length > 10) state.skills.pop();
+
+            setTimeout(() => {
+                state.workforce[councilId].ping = false;
+                state.pipeline.active = 'reflection';
+                broadcast();
+            }, 3000);
+            broadcast();
+            return;
+        }
+
+        // --- PIPELINE STAGES ---
+        if (msg.includes('Received message') || msg.includes('user_message') || log.kind === 'user_message') {
+            state.pipeline.active = 'consultation';
+            state.gandalf.command = "Hammer has spoken. Consulting the Council...";
+            broadcast();
+        }
+
+        if (msg.includes('Run completed') || msg.includes('run_finish') || log.kind === 'run_finish') {
+            state.pipeline.active = 'delivery';
+            setTimeout(() => {
+                state.pipeline.active = null;
+                state.gandalf.assignment = "Observing Council of Elrond";
+                broadcast();
+            }, 5000);
+            broadcast();
+        }
+
+    } catch (e) {
+        // Simple string parsing fallback
+        if (line.includes('Calling tool')) {
+            state.pipeline.active = 'execution';
+            broadcast();
+        }
+    }
+};
+
 if (fs.existsSync(logPath)) {
-    const tail = spawn('tail', ['-f', '-n', '0', logPath]);
+    const tail = spawn('tail', ['-f', '-n', '50', logPath]);
     tail.stdout.on('data', (data) => {
         const lines = data.toString().split('\n');
-        lines.forEach(line => {
-            if (!line.trim()) return;
-            try {
-                const log = JSON.parse(line);
-                
-                // Skill/Tool Execution
-                if (log.kind === 'tool_start' || (log.level === 'info' && log.msg?.includes('Calling tool'))) {
-                    const agentId = log.agentId || 'auditor';
-                    const councilId = agentMap[agentId] || 'celebrimbor';
-                    const toolName = log.tool || log.name || 'unknown';
-                    
-                    state.pipeline.active = 'execution';
-                    state.workforce[councilId].task = `Executing ${toolName}...`;
-                    state.workforce[councilId].ping = true;
-                    state.gandalf.assignment = `Gandalf: ${councilId.toUpperCase()} is executing ${toolName}`;
-
-                    // Add to log
-                    state.skills.unshift({
-                        user: councilId,
-                        skill: toolName,
-                        target: log.input ? JSON.stringify(log.input).substring(0, 30) + '...' : 'active process',
-                        summary: `Live system call: ${toolName}`,
-                        model: MODELS[councilId],
-                        time: new Date().toLocaleTimeString(),
-                        color: COLORS[councilId]
-                    });
-                    if (state.skills.length > 10) state.skills.pop();
-
-                    setTimeout(() => {
-                        state.workforce[councilId].ping = false;
-                        state.pipeline.active = 'reflection';
-                        broadcast();
-                    }, 2000);
-                }
-
-                // Completion
-                if (log.kind === 'run_finish' || log.msg?.includes('Run completed')) {
-                    state.pipeline.active = 'delivery';
-                    setTimeout(() => {
-                        state.pipeline.active = null;
-                        state.gandalf.assignment = "Observing Council of Elrond";
-                        broadcast();
-                    }, 3000);
-                }
-
-                // User Input (Consultation)
-                if (log.kind === 'user_message' || log.msg?.includes('Received message')) {
-                    state.pipeline.active = 'consultation';
-                    state.gandalf.command = log.text || "Analyzing Inbound Request...";
-                    broadcast();
-                }
-
-            } catch (e) {
-                // Not JSON or parse error
-            }
-        });
-        broadcast();
+        lines.forEach(processLogLine);
     });
 }
 
 io.on('connection', (socket) => {
   console.log('Client connected to REAL Mission Control');
   broadcast();
+  
+  socket.on('manual-mission', (mission) => {
+      state.pipeline.active = 'consultation';
+      state.gandalf.command = mission.command;
+      broadcast();
+  });
+
+  // Approval Handlers
+  socket.on('approve-action', (data) => {
+    // To be implemented: Link back to openclaw gateway approvals
+    console.log('Dashboard Approval Received:', data);
+  });
 });
 
 server.listen(PORT, () => {
