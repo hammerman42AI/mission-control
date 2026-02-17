@@ -1,0 +1,565 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Aegis Mission Control | LOTR Edition</title>
+    <!-- Gridstack.js -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/gridstack@10.3.1/dist/gridstack.min.css" />
+    <script src="https://cdn.jsdelivr.net/npm/gridstack@10.3.1/dist/gridstack-all.js"></script>
+    <!-- Google Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Orbitron:wght@400;700&display=swap" rel="stylesheet">
+    <!-- Chart.js -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="/socket.io/socket.io.js"></script>
+    <style>
+        :root {
+            --bg-color: #050505;
+            --panel-bg: rgba(20, 20, 25, 0.7);
+            --border-color: rgba(0, 242, 234, 0.3);
+            --text-color: #e0e0e0;
+            --accent-cyan: #00f2ea;
+            --accent-red: #ff0055;
+            --accent-gold: #ffcc33;
+            --font-main: 'JetBrains Mono', monospace;
+            --font-hdr: 'Orbitron', sans-serif;
+        }
+
+        body {
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            font-family: var(--font-main);
+            margin: 0;
+            overflow-x: hidden;
+            background-image: 
+                radial-gradient(circle at 50% 50%, rgba(0, 242, 234, 0.05) 0%, transparent 80%),
+                linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.25) 50%),
+                linear-gradient(90deg, rgba(255, 0, 0, 0.06), rgba(0, 255, 0, 0.02), rgba(0, 0, 255, 0.06));
+            background-size: 100% 100%, 100% 4px, 3px 100%;
+        }
+
+        header {
+            padding: 1rem 2rem;
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            backdrop-filter: blur(10px);
+            position: sticky;
+            top: 0;
+            z-index: 1000;
+        }
+
+        .title-group h1 {
+            font-family: var(--font-hdr);
+            margin: 0;
+            font-size: 1.5rem;
+            letter-spacing: 2px;
+            color: var(--accent-cyan);
+            text-transform: uppercase;
+        }
+
+        .title-group span {
+            font-size: 0.7rem;
+            opacity: 0.6;
+            letter-spacing: 1px;
+        }
+
+        .grid-stack-item-content {
+            background: var(--panel-bg);
+            border: 1px solid var(--border-color);
+            backdrop-filter: blur(15px);
+            border-radius: 4px;
+            padding: 10px;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.5);
+        }
+
+        .panel-header {
+            font-family: var(--font-hdr);
+            font-size: 0.8rem;
+            color: var(--accent-cyan);
+            border-bottom: 1px solid rgba(0, 242, 234, 0.1);
+            padding-bottom: 5px;
+            margin-bottom: 10px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .panel-body {
+            flex-grow: 1;
+            font-size: 0.85rem;
+            overflow-y: auto;
+        }
+
+        /* Workforce */
+        .workforce-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+            padding: 5px;
+        }
+
+        .employee-card {
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid rgba(255, 255, 255, 0.05);
+            border-radius: 8px;
+            padding: 12px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            position: relative;
+            transition: border-color 0.3s;
+        }
+
+        .avatar {
+            width: 50px;
+            height: 50px;
+            border-radius: 50%;
+            background: #111;
+            border: 2px solid var(--border-color);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.5rem;
+            flex-shrink: 0;
+            box-shadow: 0 0 10px rgba(0,0,0,0.5);
+        }
+
+        .emp-info {
+            flex-grow: 1;
+            min-width: 0;
+        }
+
+        .emp-name {
+            font-family: var(--font-hdr);
+            font-size: 0.8rem;
+            color: var(--accent-gold);
+            margin-bottom: 4px;
+        }
+
+        .emp-task {
+            font-size: 0.7rem;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            opacity: 0.7;
+            color: #00ff88;
+        }
+
+        .interaction-ping {
+            position: absolute;
+            top: 5px;
+            right: 5px;
+            width: 10px;
+            height: 10px;
+            background: var(--accent-cyan);
+            border-radius: 50%;
+            display: none;
+            box-shadow: 0 0 10px var(--accent-cyan);
+        }
+
+        .active-ping {
+            display: block;
+            animation: ping-pulse 1s infinite;
+        }
+
+        @keyframes ping-pulse {
+            0% { transform: scale(1); opacity: 1; }
+            100% { transform: scale(2.5); opacity: 0; }
+        }
+
+        .stat-row {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 8px;
+            padding-bottom: 4px;
+            border-bottom: 1px solid rgba(255,255,255,0.05);
+        }
+
+        .stat-label { opacity: 0.6; font-size: 0.7rem; }
+        .stat-value { color: var(--accent-cyan); font-weight: bold; }
+
+        .terminal-text {
+            color: #00ff88;
+            font-size: 0.75rem;
+            line-height: 1.4;
+            font-family: 'JetBrains Mono', monospace;
+        }
+
+        .threat-item {
+            border-left: 2px solid var(--accent-red);
+            padding-left: 8px;
+            margin-bottom: 10px;
+        }
+
+        .threat-title { font-weight: bold; font-size: 0.8rem; }
+        .threat-meta { font-size: 0.65rem; opacity: 0.5; }
+
+        /* Pipeline Stages */
+        .pipeline-stage {
+            font-size: 0.55rem;
+            letter-spacing: 1px;
+            padding: 4px 8px;
+            border-radius: 2px;
+            border: 1px solid transparent;
+            opacity: 0.3;
+            transition: all 0.3s;
+        }
+
+        .pipeline-arrow {
+            font-size: 0.6rem;
+            opacity: 0.2;
+            display: flex;
+            align-items: center;
+        }
+
+        .stage-active {
+            opacity: 1;
+            border-color: #fff;
+            box-shadow: 0 0 10px rgba(255,255,255,0.2);
+            background: rgba(255,255,255,0.05);
+        }
+
+        .stage-complete {
+            opacity: 0.6;
+            color: var(--accent-cyan);
+            border-color: rgba(0, 242, 234, 0.2);
+        }
+
+    </style>
+</head>
+<body>
+
+<header>
+    <div class="title-group">
+        <h1>Mission Control</h1>
+        <span>AEGIS STRATEGIC OVERLAY // STANDALONE_V1.1</span>
+    </div>
+</header>
+
+    <div class="grid-stack" style="padding: 20px;">
+        <!-- Gandalf: The White Wizard (Orchestrator) -->
+        <div class="grid-stack-item" gs-x="0" gs-y="0" gs-w="12" gs-h="3">
+            <div class="grid-stack-item-content" style="border-color: #fff; background: linear-gradient(to right, rgba(255,255,255,0.1), var(--panel-bg));">
+                <div class="panel-header">
+                    <span style="color: #fff;">GANDALF THE WHITE</span>
+                    <small>System Overseer / Orchestrator</small>
+                </div>
+                <div class="panel-body" style="display: flex; align-items: center; gap: 20px;">
+                    <div class="avatar" style="width: 64px; height: 64px; border-color: #fff; font-size: 2rem; box-shadow: 0 0 20px #fff;">🧙‍♂️</div>
+                    <div style="flex-grow: 1;">
+                        <div id="gandalf-command" class="terminal-text" style="color: #fff; font-size: 0.9rem; font-weight: bold;">
+                            "All we have to decide is what to do with the time that is given us."
+                        </div>
+                        <div id="gandalf-assignment" style="font-size: 0.75rem; opacity: 0.7; margin-top: 5px;">
+                            Overseeing the Council of Elrond...
+                        </div>
+                        <!-- Mission Pipeline -->
+                        <div id="mission-pipeline" style="display: flex; gap: 10px; margin-top: 15px; background: rgba(0,0,0,0.3); padding: 8px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.05);">
+                            <div class="pipeline-stage" id="stage-consultation">CONSULTATION</div>
+                            <div class="pipeline-arrow">→</div>
+                            <div class="pipeline-stage" id="stage-assignment">ASSIGNMENT</div>
+                            <div class="pipeline-arrow">→</div>
+                            <div class="pipeline-stage" id="stage-execution">EXECUTION</div>
+                            <div class="pipeline-arrow">→</div>
+                            <div class="pipeline-stage" id="stage-reflection">REFLECTION</div>
+                            <div class="pipeline-arrow">→</div>
+                            <div class="pipeline-stage" id="stage-delivery">DELIVERY</div>
+                        </div>
+                    </div>
+                    <div id="gandalf-ping" class="interaction-ping" style="background: #fff; box-shadow: 0 0 15px #fff; position: relative; top: 0; right: 0;"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Detail Modal (Overlay) -->
+        <div id="detail-modal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); z-index: 2000; backdrop-filter: blur(10px); align-items: center; justify-content: center;">
+            <div class="grid-stack-item-content" style="width: 500px; max-height: 80vh; border-color: var(--accent-gold);">
+                <div class="panel-header">
+                    <span id="modal-title">SKILL_DETAILS</span>
+                    <button onclick="closeModal()" style="background: none; border: none; color: var(--accent-red); cursor: pointer; font-family: var(--font-hdr);">[X]</button>
+                </div>
+                <div class="panel-body" id="modal-content" style="font-family: 'JetBrains Mono'; font-size: 0.8rem; line-height: 1.5; padding: 10px;">
+                </div>
+            </div>
+        </div>
+
+        <!-- Skill Log (The Book of Mazarbul) -->
+        <div class="grid-stack-item" gs-x="0" gs-y="3" gs-w="4" gs-h="8">
+            <div class="grid-stack-item-content">
+                <div class="panel-header">
+                    <span>BOOK OF MAZARBUL</span>
+                    <small>Skill Execution Log</small>
+                </div>
+                <div class="panel-body">
+                    <div id="skill-log" style="font-size: 0.7rem; font-family: var(--font-main);">
+                        <!-- Skills will be injected here -->
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- The Council (Workforce) -->
+        <div class="grid-stack-item" gs-x="4" gs-y="3" gs-w="8" gs-h="4">
+        <div class="grid-stack-item-content">
+            <div class="panel-header">
+                <span>THE COUNCIL OF ELROND</span>
+                <small>Active Fellowship Activity</small>
+            </div>
+            <div class="panel-body">
+                <div class="workforce-grid">
+                    <div class="employee-card" id="card-celebrimbor">
+                        <div class="avatar" title="Celebrimbor (Architect/Dev)">⚒️</div>
+                        <div class="emp-info">
+                            <div class="emp-name">CELEBRIMBOR</div>
+                            <div class="emp-task" id="task-celebrimbor">Refactoring Splunk bridge...</div>
+                        </div>
+                        <div class="interaction-ping" id="ping-celebrimbor"></div>
+                    </div>
+                    <div class="employee-card" id="card-legolas">
+                        <div class="avatar" title="Legolas (Sentinel)">🏹</div>
+                        <div class="emp-info">
+                            <div class="emp-name">LEGOLAS</div>
+                            <div class="emp-task" id="task-legolas">Scanning X for CVEs...</div>
+                        </div>
+                        <div class="interaction-ping" id="ping-legolas"></div>
+                    </div>
+                    <div class="employee-card" id="card-samwise">
+                        <div class="avatar" title="Samwise (Coordinator)">🍳</div>
+                        <div class="emp-info">
+                            <div class="emp-name">SAMWISE</div>
+                            <div class="emp-task" id="task-samwise">Scheduling Morning Brief...</div>
+                        </div>
+                        <div class="interaction-ping" id="ping-samwise"></div>
+                    </div>
+                    <div class="employee-card" id="card-elrond">
+                        <div class="avatar" title="Elrond (Librarian)">📖</div>
+                        <div class="emp-info">
+                            <div class="emp-name">ELROND</div>
+                            <div class="emp-task" id="task-elrond">Re-indexing Memory...</div>
+                        </div>
+                        <div class="interaction-ping" id="ping-elrond"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Ring of Power -->
+    <div class="grid-stack-item" gs-x="8" gs-y="0" gs-w="4" gs-h="4">
+        <div class="grid-stack-item-content">
+            <div class="panel-header">
+                <span>THE RING OF POWER</span>
+                <small>Token Burn Rate</small>
+            </div>
+            <div class="panel-body" style="text-align: center;">
+                <div style="font-size: 2.2rem; color: var(--accent-gold); margin: 10px 0; text-shadow: 0 0 10px rgba(255, 204, 51, 0.5);" id="totalTokens">0</div>
+                <div style="font-size: 0.7rem; opacity: 0.6; margin-bottom: 15px;">TOTAL TOKENS</div>
+                <div class="stat-row">
+                    <span class="stat-label">Burn Rate</span>
+                    <span class="stat-value" id="burnRate">0 t/hr</span>
+                </div>
+                <div class="stat-row">
+                    <span class="stat-label">Daily Cost</span>
+                    <span class="stat-value" id="dailyCost">$0.00</span>
+                </div>
+                <div style="width: 100%; height: 4px; background: rgba(255, 255, 255, 0.05); border-radius: 2px; margin-top: 15px; position: relative; overflow: hidden;">
+                    <div id="corruptionBar" style="height: 100%; width: 5%; background: var(--accent-gold); box-shadow: 0 0 5px var(--accent-gold); transition: width 0.5s;"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- The Palantir -->
+    <div class="grid-stack-item" gs-x="0" gs-y="4" gs-w="4" gs-h="4">
+        <div class="grid-stack-item-content">
+            <div class="panel-header">
+                <span>THE PALANTÍR</span>
+                <small>Sentinel Feed</small>
+            </div>
+            <div class="panel-body">
+                <div class="threat-item">
+                    <div class="threat-title">CVE-2026-1731</div>
+                    <div class="threat-meta">CISA KEV Alert. Critical.</div>
+                </div>
+                <div class="threat-item" style="border-left-color: var(--accent-gold);">
+                    <div class="threat-title">FMC Webhook Pulse</div>
+                    <div class="threat-meta">Aegis bridge heartbeat OK.</div>
+                </div>
+                <div class="terminal-text" id="sentinelLog">> Legolas: Monitoring...</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- System Vitality -->
+    <div class="grid-stack-item" gs-x="4" gs-y="4" gs-w="4" gs-h="4">
+        <div class="grid-stack-item-content">
+            <div class="panel-header">
+                <span>HEART OF THE MOUNTAIN</span>
+                <small>System Vitals</small>
+            </div>
+            <div class="panel-body" style="display: flex; flex-direction: column; align-items: center; justify-content: center;">
+                <canvas id="vitalChart" width="140" height="140"></canvas>
+                <div style="margin-top: 10px; width: 100%;">
+                    <div class="stat-row">
+                        <span class="stat-label">Load</span>
+                        <span class="stat-value" id="loadValue">12%</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    var grid = GridStack.init({
+        cellHeight: 70,
+        margin: 10
+    });
+
+    const socket = io();
+
+    socket.on('telemetry', (data) => {
+        // Handle explicit manual command overrides
+        if (window.manualCommandActive) {
+            data.gandalf.command = window.manualCommandText;
+        }
+
+        // Update Ring of Power
+        document.getElementById('totalTokens').innerText = data.ringOfPower.totalTokens.toLocaleString();
+        document.getElementById('burnRate').innerText = `${data.ringOfPower.hourlyRate} t/hr`;
+        document.getElementById('dailyCost').innerText = `$${data.ringOfPower.costEstimate}`;
+        document.getElementById('corruptionBar').style.width = `${data.ringOfPower.corruptionLevel}%`;
+
+        // Update Vitals
+        document.getElementById('loadValue').innerText = `${data.vitals.load}%`;
+        if (window.vitalDoughnut) {
+            window.vitalDoughnut.data.datasets[0].data = [data.vitals.load, 100 - data.vitals.load];
+            window.vitalDoughnut.update('none');
+        }
+
+        // Update Workforce
+        if (data.workforce) {
+            Object.keys(data.workforce).forEach(id => {
+                const taskEl = document.getElementById(`task-${id}`);
+                const pingEl = document.getElementById(`ping-${id}`);
+                const cardEl = document.getElementById(`card-${id}`);
+                
+                if (taskEl) taskEl.innerText = data.workforce[id].task;
+                
+                if (data.workforce[id].ping) {
+                    pingEl.classList.add('active-ping');
+                    cardEl.style.borderColor = 'var(--accent-cyan)';
+                    setTimeout(() => {
+                        pingEl.classList.remove('active-ping');
+                        cardEl.style.borderColor = 'rgba(255, 255, 255, 0.05)';
+                    }, 1500);
+                }
+            });
+        }
+
+        // Update Gandalf
+        if (data.gandalf) {
+            document.getElementById('gandalf-command').innerText = data.gandalf.command;
+            document.getElementById('gandalf-assignment').innerText = data.gandalf.assignment;
+            if (data.gandalf.ping) {
+                const gPing = document.getElementById('gandalf-ping');
+                gPing.classList.add('active-ping');
+                setTimeout(() => gPing.classList.remove('active-ping'), 1500);
+            }
+        }
+
+        // Update Pipeline
+        if (data.pipeline) {
+            const stages = ['consultation', 'assignment', 'execution', 'reflection', 'delivery'];
+            stages.forEach(s => {
+                const el = document.getElementById(`stage-${s}`);
+                el.classList.remove('stage-active', 'stage-complete');
+                if (data.pipeline.active === s) {
+                    el.classList.add('stage-active');
+                } else if (stages.indexOf(s) < stages.indexOf(data.pipeline.active)) {
+                    el.classList.add('stage-complete');
+                }
+            });
+        }
+
+        // Update Skill Log
+        if (data.skills) {
+            const logEl = document.getElementById('skill-log');
+            logEl.innerHTML = data.skills.map((s, idx) => `
+                <div onclick="showSkillDetails(${idx})" style="border-left: 2px solid ${s.color}; padding: 8px; margin-bottom: 8px; background: rgba(255,255,255,0.02); border-radius: 0 4px 4px 0; cursor: pointer; transition: background 0.2s;" onmouseover="this.style.background='rgba(255,255,255,0.08)'" onmouseout="this.style.background='rgba(255,255,255,0.02)'">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+                        <span style="color: ${s.color}; font-weight: bold; text-transform: uppercase; font-size: 0.6rem; letter-spacing: 1px;">${s.user}</span>
+                        <span style="font-size: 0.55rem; opacity: 0.3;">${s.time}</span>
+                    </div>
+                    <div style="color: var(--accent-cyan); font-size: 0.75rem; font-weight: bold; margin-bottom: 2px;">${s.skill}(<span style="color: var(--text-color); font-weight: normal; font-size: 0.65rem;">${s.target}</span>)</div>
+                    <div style="font-size: 0.65rem; opacity: 0.7; font-style: italic;">"${s.summary}"</div>
+                </div>
+            `).join('');
+            window.currentSkills = data.skills;
+        }
+    });
+
+    const ctx = document.getElementById('vitalChart').getContext('2d');
+    window.vitalDoughnut = new Chart(ctx, {
+        type: 'doughnut',
+        data: {
+            labels: ['Used', 'Free'],
+            datasets: [{
+                data: [12, 88],
+                backgroundColor: ['#00f2ea', 'rgba(0, 242, 234, 0.1)'],
+                borderWidth: 0
+            }]
+        },
+        options: { cutout: '80%', plugins: { legend: { display: false } } }
+    });
+
+    function showSkillDetails(idx) {
+        const skill = window.currentSkills[idx];
+        const modal = document.getElementById('detail-modal');
+        const content = document.getElementById('modal-content');
+        const title = document.getElementById('modal-title');
+
+        title.innerText = `${skill.user.toUpperCase()} // ${skill.skill.toUpperCase()}`;
+        title.style.color = skill.color;
+
+        content.innerHTML = `
+            <div style="margin-bottom: 12px;">
+                <span style="opacity: 0.5;">Action:</span> <span style="color: var(--accent-cyan); font-weight: bold;">${skill.skill}</span>
+            </div>
+            <div style="margin-bottom: 12px;">
+                <span style="opacity: 0.5;">Model:</span> <span style="color: var(--accent-gold); font-weight: bold;">${skill.model}</span>
+            </div>
+            <div style="margin-bottom: 12px;">
+                <span style="opacity: 0.5;">Target:</span> <span style="color: #fff;">${skill.target}</span>
+            </div>
+            <div style="margin-bottom: 12px;">
+                <span style="opacity: 0.5;">Description:</span> <br>
+                <span style="color: #00ff88;">"${skill.summary}"</span>
+            </div>
+            <div style="margin-bottom: 12px; border-top: 1px solid rgba(255,255,255,0.1); padding-top: 10px;">
+                <span style="opacity: 0.5;">Full Logic Path:</span> <br>
+                <div class="terminal-text" style="background: rgba(0,0,0,0.5); padding: 10px; margin-top: 5px; border-radius: 4px;">
+                    > Initialized by GANDALF<br>
+                    > Model Assigned: ${skill.model}<br>
+                    > Routing to ${skill.user.toUpperCase()}<br>
+                    > Status: SUCCESS<br>
+                    > Timestamp: ${skill.time}
+                </div>
+            </div>
+        `;
+
+        modal.style.display = 'flex';
+    }
+
+    function closeModal() {
+        document.getElementById('detail-modal').style.display = 'none';
+    }
+
+</script>
+</body>
+</html>
