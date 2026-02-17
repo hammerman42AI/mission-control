@@ -10,8 +10,14 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = 8888;
 
 // OpenClaw Gateway Config
-const GATEWAY_URL = `http://127.0.0.1:${process.env.OPENCLAW_GATEWAY_PORT || 18789}`;
-const GATEWAY_TOKEN = process.env.OPENCLAW_GATEWAY_TOKEN || 'd6bf613fbcac1ac65e264d6baf94dde8e01aa2e313778af4';
+const GATEWAY_PORT = process.env.OPENCLAW_GATEWAY_PORT || 18789;
+const GATEWAY_HTTP_URL = `http://127.0.0.1:${GATEWAY_PORT}`;
+const GATEWAY_WS_URL = `ws://127.0.0.1:${GATEWAY_PORT}`;
+const GATEWAY_TOKEN = process.env.OPENCLAW_GATEWAY_TOKEN;
+if (!GATEWAY_TOKEN) {
+  console.error('Missing OPENCLAW_GATEWAY_TOKEN env var. Refusing to start.');
+  process.exit(1);
+}
 
 const MIME_TYPES = {
   '.html': 'text/html',
@@ -78,7 +84,8 @@ const state = {
   },
   pipeline: { active: null },
   skills: [],
-  approvalPending: null
+  approvalPending: null,
+  approvals: []
 };
 
 const agentMap = {
@@ -87,6 +94,111 @@ const agentMap = {
 };
 
 const broadcast = () => io.emit('telemetry', state);
+
+// --- Gateway WS RPC (minimal) ---
+let gw;
+let gwConnected = false;
+let rpcId = 1;
+const rpcPending = new Map();
+
+function gwSend(obj) {
+  if (!gwConnected) throw new Error('Gateway WS not connected');
+  gw.send(JSON.stringify(obj));
+}
+
+async function gwRequest(method, params = {}) {
+  const id = rpcId++;
+  const payload = { id, method, params };
+  return await new Promise((resolve, reject) => {
+    const t = setTimeout(() => {
+      rpcPending.delete(id);
+      reject(new Error(`Gateway RPC timeout: ${method}`));
+    }, 10000);
+    rpcPending.set(id, { resolve, reject, t, method });
+    gwSend(payload);
+  });
+}
+
+function approvalsUpsert(item) {
+  const id = item?.id;
+  if (!id) return;
+  const idx = state.approvals.findIndex(a => a.id === id);
+  if (idx >= 0) state.approvals[idx] = { ...state.approvals[idx], ...item };
+  else state.approvals.unshift(item);
+  state.approvals = state.approvals.slice(0, 20);
+
+  // Back-compat: keep single pending approval for existing UI
+  state.approvalPending = state.approvals[0] || null;
+}
+
+function approvalsRemove(id) {
+  state.approvals = state.approvals.filter(a => a.id !== id);
+  state.approvalPending = state.approvals[0] || null;
+}
+
+function connectGatewayWs() {
+  const url = `${GATEWAY_WS_URL}/?token=${encodeURIComponent(GATEWAY_TOKEN)}`;
+  gw = new WebSocket(url);
+
+  gw.onopen = () => {
+    gwConnected = true;
+    console.log('Connected to OpenClaw Gateway WS');
+  };
+
+  gw.onclose = () => {
+    gwConnected = false;
+    console.log('Gateway WS closed; retrying in 1s');
+    setTimeout(connectGatewayWs, 1000);
+  };
+
+  gw.onerror = (err) => {
+    console.error('Gateway WS error:', err);
+  };
+
+  gw.onmessage = (evt) => {
+    let msg;
+    try { msg = JSON.parse(evt.data); } catch { return; }
+
+    // RPC response
+    if (msg && typeof msg.id === 'number' && (msg.ok !== undefined || msg.result !== undefined || msg.error !== undefined)) {
+      const p = rpcPending.get(msg.id);
+      if (!p) return;
+      clearTimeout(p.t);
+      rpcPending.delete(msg.id);
+      if (msg.ok === false || msg.error) p.reject(new Error(msg.error?.message || msg.error || 'RPC error'));
+      else p.resolve(msg.result ?? msg);
+      return;
+    }
+
+    // Broadcast event envelope (best-effort)
+    const event = msg?.event || msg?.type;
+    const data = msg?.data || msg?.payload || msg;
+
+    if (event === 'exec.approval.requested') {
+      const req = data?.request || data;
+      approvalsUpsert({
+        id: data?.id || req?.id,
+        command: req?.command,
+        request: req,
+        receivedAt: Date.now()
+      });
+      state.pipeline.active = 'assignment';
+      state.gandalf.assignment = "GATE OF BREE: Waiting for Hammer's Mark...";
+      state.gandalf.ping = true;
+      broadcast();
+      return;
+    }
+
+    if (event === 'exec.approval.resolved') {
+      approvalsRemove(data?.id);
+      state.gandalf.assignment = `Gate of Bree resolved: ${data?.decision || 'ok'}`;
+      broadcast();
+      return;
+    }
+  };
+}
+
+connectGatewayWs();
 
 // --- Real Data Ingestion ---
 
@@ -251,27 +363,18 @@ io.on('connection', (socket) => {
     const { id, allow } = data;
     
     try {
-        const response = await fetch(`${GATEWAY_URL}/api/v1/nodes/approve`, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${GATEWAY_TOKEN}`
-            },
-            body: JSON.stringify({
-                action: allow ? 'approve' : 'reject',
-                requestId: id
-            })
-        });
-        
-        const result = await response.json();
-        console.log('Gateway Response:', result);
-        
-        state.approvalPending = null;
-        state.gandalf.assignment = allow ? "Hammer's Mark received. Proceeding." : "Entry denied. Task aborted.";
+        const decision = allow ? 'allow-once' : 'deny';
+        const result = await gwRequest('exec.approval.resolve', { id, decision });
+        console.log('Gateway exec.approval.resolve result:', result);
+
+        approvalsRemove(id);
+        state.gandalf.assignment = allow ? "Hammer's Mark received (allow-once). Proceeding." : "Entry denied. Task aborted.";
         broadcast();
-        
+
     } catch (e) {
-        console.error('Failed to communicate with OpenClaw Gateway:', e);
+        console.error('Failed to resolve exec approval via gateway WS:', e);
+        state.gandalf.assignment = `Gate of Bree error: ${String(e)}`;
+        broadcast();
     }
   });
 });
