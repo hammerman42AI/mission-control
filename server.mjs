@@ -13,10 +13,18 @@ const PORT = 8888;
 const GATEWAY_PORT = process.env.OPENCLAW_GATEWAY_PORT || 18789;
 const GATEWAY_HTTP_URL = `http://127.0.0.1:${GATEWAY_PORT}`;
 const GATEWAY_WS_URL = `ws://127.0.0.1:${GATEWAY_PORT}`;
-const GATEWAY_TOKEN = process.env.OPENCLAW_GATEWAY_TOKEN;
-if (!GATEWAY_TOKEN) {
-  console.error('Missing OPENCLAW_GATEWAY_TOKEN env var. Refusing to start.');
-  process.exit(1);
+
+// Dynamic Token Discovery: Read from Source of Truth
+function getLiveGatewayToken() {
+  try {
+    const configPath = path.join(os.homedir(), '.openclaw', 'openclaw.json');
+    if (!fs.existsSync(configPath)) return null;
+    const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    return config.gateway?.auth?.token || null;
+  } catch (e) {
+    console.error('Failed to read live gateway token:', e.message);
+    return null;
+  }
 }
 
 const MIME_TYPES = {
@@ -137,7 +145,14 @@ function approvalsRemove(id) {
 }
 
 function connectGatewayWs() {
-  const url = `${GATEWAY_WS_URL}/?token=${encodeURIComponent(GATEWAY_TOKEN)}`;
+  const token = getLiveGatewayToken();
+  if (!token) {
+    console.log('Gateway token not found in config. Retrying in 5s...');
+    setTimeout(connectGatewayWs, 5000);
+    return;
+  }
+
+  const url = `${GATEWAY_WS_URL}/?token=${encodeURIComponent(token)}`;
   gw = new WebSocket(url);
 
   gw.onopen = () => {
@@ -240,14 +255,77 @@ const processLogLine = (line) => {
     if (!line.trim()) return;
     try {
         const log = JSON.parse(line);
-        const msg = log["0"] || log["2"] || log.msg || "";
-        const subsystem = log.subsystem || "";
+
+        // Extract message text
+        let msg = '';
+        if (typeof log["1"] === 'string') msg = log["1"];
+        else if (typeof log["0"] === 'string') msg = log["0"];
+        else if (typeof log.msg === 'string') msg = log.msg;
+
+        // Extract subsystem (may be nested JSON string in log["0"])
+        let subsystem = log.subsystem || "";
+        if (!subsystem && typeof log["0"] === 'string' && log["0"].startsWith('{')) {
+            try {
+                const inner = JSON.parse(log["0"]);
+                subsystem = inner.subsystem || "";
+            } catch {}
+        }
+
         const metaName = log._meta?.name || "";
+
+        // DEBUG: surface key log lines so we know ingestion works
+        if (msg && (msg.includes('embedded run tool') || msg.includes('Received message') || msg.includes('run_finish'))) {
+            console.log('[MissionControl][log]', msg);
+        }
         
         // Derive Agent/Council ID
         let councilId = 'celebrimbor'; // default
-        if (metaName.includes('main') || msg.includes('main')) councilId = 'samwise';
+        if (metaName.includes('main') || msg.includes('main') || msg.includes('sessionId=5166e84b') || log.sessionId === '5166e84b-c182-419d-8a96-9e275fc464b7') councilId = 'samwise';
         if (metaName.includes('auditor')) councilId = 'celebrimbor';
+        if (msg.includes('subagent') || log.sessionId?.includes('subagent')) councilId = 'legolas';
+
+        // TOOL EXECUTION STATE UPDATES
+        let toolName = null;
+        const match = msg.match(/tool=(\w+)/);
+        if (match) toolName = match[1];
+
+        if (msg.includes('embedded run tool start')) {
+            state.pipeline.active = 'execution';
+            state.workforce[councilId].task = toolName ? `Executing ${toolName}...` : 'Executing task...';
+            state.workforce[councilId].ping = true;
+
+            state.gandalf.assignment = `${councilId.toUpperCase()} is busy at the Forge.`;
+
+            state.skills.unshift({
+                user: councilId,
+                skill: toolName || 'tool',
+                target: 'active pulse',
+                summary: `System action: ${toolName || 'tool'}`,
+                model: MODELS[councilId],
+                time: new Date().toLocaleTimeString(),
+                color: COLORS[councilId]
+            });
+            if (state.skills.length > 10) state.skills.pop();
+
+            broadcast();
+            return;
+        }
+
+        if (msg.includes('embedded run tool end')) {
+            state.workforce[councilId].task = 'Idle';
+            state.workforce[councilId].ping = false;
+            state.pipeline.active = 'reflection';
+
+            // allow UI to show reflection briefly, then clear
+            setTimeout(() => {
+                state.pipeline.active = null;
+                state.gandalf.assignment = 'Observing Council of Elrond';
+                broadcast();
+            }, 3000);
+
+            broadcast();
+            return;
+        }
 
         // --- GATE OF BREE (Approvals) ---
         // Format: {"subsystem":"gateway/exec-approvals","id":"...","command":"..."}
@@ -280,43 +358,8 @@ const processLogLine = (line) => {
              return;
         }
 
-        // --- SKILL EXECUTION ---
-        let toolName = null;
-        if (msg.includes('Calling tool')) {
-            const match = msg.match(/Calling tool (\w+)/);
-            toolName = match ? match[1] : 'tool';
-        } else if (msg.includes('[tools]')) {
-            const match = msg.match(/\[tools\] (\w+)/);
-            toolName = match ? match[1] : 'tool';
-        } else if (log.kind === 'tool_start') {
-            toolName = log.tool || 'process';
-        }
-
-        if (toolName) {
-            state.pipeline.active = 'execution';
-            state.workforce[councilId].task = `Executing ${toolName}...`;
-            state.workforce[councilId].ping = true;
-            state.gandalf.assignment = `${councilId.toUpperCase()} is busy at the Forge.`;
-
-            state.skills.unshift({
-                user: councilId,
-                skill: toolName,
-                target: log["1"] ? (typeof log["1"] === 'string' ? log["1"] : JSON.stringify(log["1"])).substring(0, 40) : 'active pulse',
-                summary: `System action: ${toolName}`,
-                model: MODELS[councilId],
-                time: new Date().toLocaleTimeString(),
-                color: COLORS[councilId]
-            });
-            if (state.skills.length > 10) state.skills.pop();
-
-            setTimeout(() => {
-                state.workforce[councilId].ping = false;
-                state.pipeline.active = 'reflection';
-                broadcast();
-            }, 3000);
-            broadcast();
-            return;
-        }
+        // --- SKILL EXECUTION (unified) ---
+        // (removed in favor of simpler embedded-run handling above)
 
         // --- PIPELINE STAGES ---
         if (msg.includes('Received message') || msg.includes('user_message') || log.kind === 'user_message') {
@@ -340,11 +383,52 @@ const processLogLine = (line) => {
 };
 
 if (fs.existsSync(logPath)) {
-    const tail = spawn('tail', ['-f', '-n', '50', logPath]);
-    tail.stdout.on('data', (data) => {
-        const lines = data.toString().split('\n');
-        lines.forEach(processLogLine);
+  console.log('[MissionControl] Starting Node log watcher on', logPath);
+
+  let offset = 0;
+  try {
+    const stat = fs.statSync(logPath);
+    offset = stat.size; // start at EOF, like tail -f
+  } catch (e) {
+    console.error('[MissionControl] Failed to stat log file:', e.message);
+  }
+
+  const readNewData = () => {
+    fs.stat(logPath, (err, stat) => {
+      if (err) {
+        console.error('[MissionControl] log stat error:', err.message);
+        return;
+      }
+      if (stat.size <= offset) return; // nothing new
+
+      const length = stat.size - offset;
+      const buffer = Buffer.alloc(length);
+      fs.open(logPath, 'r', (openErr, fd) => {
+        if (openErr) {
+          console.error('[MissionControl] log open error:', openErr.message);
+          return;
+        }
+        fs.read(fd, buffer, 0, length, offset, (readErr, bytesRead) => {
+          fs.close(fd, () => {});
+          if (readErr || !bytesRead) return;
+          offset += bytesRead;
+          const chunk = buffer.toString('utf8', 0, bytesRead);
+          console.log('[MissionControl][chunk]', JSON.stringify(chunk.slice(0, 200)));
+          const lines = chunk.split('\n');
+          for (const line of lines) {
+            if (!line.trim()) continue;
+            console.log('[MissionControl][line]', line.slice(0, 200));
+            processLogLine(line);
+          }
+        });
+      });
     });
+  };
+
+  // Poll every 1s for new data (tail -f style)
+  setInterval(readNewData, 1000);
+} else {
+  console.warn('[MissionControl] Log file not found:', logPath);
 }
 
 io.on('connection', (socket) => {
